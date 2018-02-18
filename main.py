@@ -66,6 +66,7 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
   :return: The Tensor for the last layer of output
   """
 
+  # Debug check VGG layer dimensions
   #print("vgg_layer3_out:", vgg_layer3_out.get_shape())
   #print("vgg_layer4_out:", vgg_layer4_out.get_shape())
   #print("vgg_layer7_out:", vgg_layer7_out.get_shape())
@@ -127,9 +128,10 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
                     kernel_initializer=tf.zeros_initializer,
                     name='upscore8')
 
-  #tf.Print(fcn8_out, [tf.shape(fcn8_out)])
-
+  # Add identity layer to name output
   fcn8s_out = tf.identity(upscore8, name='fcn8s_out')
+
+  #tf.Print(fcn8_out, [tf.shape(fcn8_out)])
 
   return fcn8s_out
 
@@ -153,21 +155,22 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
 
   # Calculate softmax cross entropy loss and regularization loss operations
   cross_entropies = tf.nn.softmax_cross_entropy_with_logits_v2(
-                                                 logits=logits, labels=labels)
+                                                   logits=logits, labels=labels)
   cross_entropy_loss = tf.reduce_mean(cross_entropies)
 
   l2_reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
   regularization_loss = tf.reduce_sum(l2_reg_losses)
 
   total_loss = cross_entropy_loss + regularization_loss
-  #total_loss_named = tf.identity(total_loss, name="total_loss")
 
+  # Add loss to TensorBoard summary logging
   tf.summary.scalar('loss', total_loss)
 
   # Set up Adam optimizer and training operation to minimize total loss
   global_step = tf.Variable(0, trainable=False, name='global_step')
   optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-  train_op = optimizer.minimize(total_loss, global_step=global_step, name='train_op')
+  train_op = optimizer.minimize(total_loss, global_step=global_step,
+                                name='train_op')
 
   return logits, train_op, total_loss
 
@@ -193,13 +196,13 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op,
   :param learning_rate: TF Placeholder for learning rate
   """
 
-  # Initialize any uninitialized variables
+  # Set up TensorBoard logging output
   tb_out_dir = os.path.join('tb/', str(time.time()))
   tb_merged = tf.summary.merge_all()
-
   #train_writer = tf.summary.FileWriter(tb_out_dir, sess.graph) # with graph
   train_writer = tf.summary.FileWriter(tb_out_dir) # without graph
 
+  # Initialize any uninitialized variables
   sess.run(tf.global_variables_initializer())
 
   for epoch in range(epochs):
@@ -212,6 +215,7 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op,
       _, loss_value, summary = sess.run([train_op, cross_entropy_loss,
                                          tb_merged], feed_dict=feed_dict)
 
+      # Log loss for each global step
       step = tf.train.global_step(sess, tf.train.get_global_step())
       train_writer.add_summary(summary, step)
       print("  Step", step, "loss =", loss_value)
@@ -223,7 +227,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-md', '--mode',
-      help='mode: 0=train new, 1=train existing, 2=test. [0]', type=int, default=0)
+      help='mode: 0=train, 1=test. [0]', type=int, default=0)
 
     parser.add_argument('-ep', '--epochs',
       help='epochs [1]', type=int, default=1)
@@ -234,7 +238,6 @@ def parse_args():
     parser.add_argument('-lr', '--learn_rate',
       help='learning rate [0.0001]', type=float, default=0.0001)
 
-    #parser.add_argument('-tb', '--tensor_board', help='enable TensorBoard logging', action="store_true")
     args = parser.parse_args()
     return args
 
@@ -248,6 +251,8 @@ def run():
   kImageShape = (160, 576)
   data_dir = './data'
   runs_dir = './runs'
+  model_path = './duffnet/'
+  model_name = 'duffnet'
 
   print('\nTesting Kitti dataset...')
   tests.test_for_kitti_dataset(data_dir) # check for Kitti data set
@@ -257,65 +262,56 @@ def run():
   batch_size = args.batch_size
   learning_rate = args.learn_rate
 
+  # TensorFlow placeholders
   correct_label = tf.placeholder(tf.bool, [None, None, None, kNumClasses])
 
   # Download pretrained vgg model
   helper.maybe_download_pretrained_vgg(data_dir)
 
-  # OPTIONAL: Train and Inference on the cityscapes dataset instead of the
-  #  Kitti dataset. You'll need a GPU with at least 10 teraFLOPS to train on.
-  #  https://www.cityscapes-dataset.com/
+  # Path to vgg model
+  vgg_path = os.path.join(data_dir, 'vgg')
+  data_folder = os.path.join(data_dir, 'data_road/training')
+
+  # Create generator function to get batches
+  get_batches_fn = helper.gen_batch_function(data_folder, kImageShape)
+
+  # OPTIONAL: Augment Images for better results
+  #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
 
   with tf.Session() as sess:
 
-    # Path to vgg model
-    vgg_path = os.path.join(data_dir, 'vgg')
-    data_folder = os.path.join(data_dir, 'data_road/training')
+    ### Train new network ###
+    if args.mode == 0:
 
-    # Create generator function to get batches
-    get_batches_fn = helper.gen_batch_function(data_folder, kImageShape)
-
-    # OPTIONAL: Augment Images for better results
-    #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
-
-
-    # Build NN using load_vgg, layers, and optimize function
-    #if args.mode == 0: # Build new network
-    img_input, keep_prob, vgg3, vgg4, vgg7 = load_vgg(sess, vgg_path)
-    fcn8s_out = layers(vgg3, vgg4, vgg7, kNumClasses)
-    logits, train_op, loss = optimize(fcn8s_out, correct_label, learning_rate,
+      # Build NN using load_vgg, layers, and optimize function
+      img_input, keep_prob, vgg3, vgg4, vgg7 = load_vgg(sess, vgg_path)
+      fcn8s_out = layers(vgg3, vgg4, vgg7, kNumClasses)
+      logits, train_op, loss = optimize(fcn8s_out, correct_label, learning_rate,
                                         kNumClasses)
-    """
-    elif args.mode == 1: # Load existing network
-      tf.saved_model.loader.load(sess, ['duffnet'], './duffnet')
-      #saver = tf.train.import_meta_graph('./duffnet-2.meta')
-      #saver.restore(sess, tf.train.latest_checkpoint('.'))
 
+      # Train NN using the train_nn function
+      train_nn(sess, epochs, batch_size, get_batches_fn, train_op, loss,
+               img_input, correct_label, keep_prob, learning_rate)
+
+      # Save model result
+      saver = tf.train.Saver()
+      save_path = saver.save(sess, model_path+model_name)
+      print("\nModel saved.")
+
+    ### Test network ###
+    elif args.mode == 1:
+
+      # Load saved model
+      saver = tf.train.import_meta_graph(model_path+model_name+'.meta')
+      saver.restore(sess, tf.train.latest_checkpoint(model_path))
       graph = tf.get_default_graph()
       img_input = graph.get_tensor_by_name('image_input:0')
       keep_prob = graph.get_tensor_by_name('keep_prob:0')
       fcn8s_out = graph.get_tensor_by_name('fcn8s_out:0')
       logits = tf.reshape(fcn8s_out, (-1, kNumClasses))
-      train_op = graph.get_tensor_by_name('train_op:0')
-      loss = graph.get_tensor_by_name('total_loss:0')
-"""
-    # Train NN using the train_nn function
-    train_nn(sess, epochs, batch_size, get_batches_fn, train_op, loss,
-              img_input, correct_label, keep_prob, learning_rate)
 
-    # Save model result
-    builder = tf.saved_model.builder.SavedModelBuilder('./duffnet')
-    builder.add_meta_graph_and_variables(sess, ['duffnet'])
-    builder.save()
-
-    #saver = tf.train.Saver()
-    #step = tf.train.global_step(sess, tf.train.get_global_step())
-    #saver.save(sess, './duffnet', global_step=step)
-    print("\nModel saved.")
-
-    # Save inference data using helper.save_inference_samples
-    #if args.mode == 2:
-    helper.save_inference_samples(runs_dir, data_dir, sess, kImageShape,
+      # Process test images
+      helper.save_inference_samples(runs_dir, data_dir, sess, kImageShape,
                                     logits, keep_prob, img_input)
 
     # OPTIONAL: Apply the trained model to a video
