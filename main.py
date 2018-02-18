@@ -6,8 +6,11 @@ from distutils.version import LooseVersion
 import project_tests as tests
 
 import time
-from tqdm import tqdm
 import argparse
+from moviepy.editor import VideoFileClip
+import scipy.misc
+import numpy as np
+from PIL import Image
 
 # Check TensorFlow Version
 assert LooseVersion(tf.__version__) >= LooseVersion('1.0'), \
@@ -17,7 +20,7 @@ assert LooseVersion(tf.__version__) >= LooseVersion('1.0'), \
 print('TensorFlow Version: {}'.format(tf.__version__))
 
 # Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # Check for a GPU
 if not tf.test.gpu_device_name():
@@ -72,19 +75,24 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
   #print("vgg_layer7_out:", vgg_layer7_out.get_shape())
 
   # Implement FCN-8s architecture based on:
-  # https://github.com/shelhamer/fcn.berkeleyvision.org/blob/master/voc-fcn8s-atonce/net.py
+  # https://github.com/shelhamer/fcn.berkeleyvision.org/blob/master/
+  #         voc-fcn8s-atonce/net.py
+
+  # Kernel parameters
+  kL2Reg = 0.001
+  kInitSTD = 0.01
 
   # Apply 1x1 convolution to VGG layer 7 to reduce # of classes to num_classes
   score_fr = tf.layers.conv2d(vgg_layer7_out, num_classes,
-              kernel_size=1, strides=1, padding='same',
-              kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
-              kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
-              name='score_fr')
+            kernel_size=1, strides=1, padding='same',
+            kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
+            kernel_initializer=tf.truncated_normal_initializer(stddev=kInitSTD),
+            name='score_fr')
 
   # Upsample 2x by transposed convolution
   upscore2 = tf.layers.conv2d_transpose(score_fr, num_classes,
                     kernel_size=4, strides=2, padding='same',
-                    kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
+                    kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
                     kernel_initializer=tf.zeros_initializer,
                     name='upscore2')
 
@@ -93,10 +101,10 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
 
   # Apply 1x1 convolution to rescaled VGG layer 4 to reduce # of classes
   score_pool4 = tf.layers.conv2d(scale_pool4, num_classes,
-              kernel_size=1, strides=1, padding='same',
-              kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
-              kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
-              name='score_pool4')
+            kernel_size=1, strides=1, padding='same',
+            kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
+            kernel_initializer=tf.truncated_normal_initializer(stddev=kInitSTD),
+            name='score_pool4')
 
   # Add skip layer from VGG layer 4
   fuse_pool4 = tf.add(upscore2, score_pool4)
@@ -104,7 +112,7 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
   # Upsample 2x by transposed convolution
   upscore_pool4 = tf.layers.conv2d_transpose(fuse_pool4, num_classes,
                     kernel_size=4, strides=2, padding='same',
-                    kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
+                    kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
                     kernel_initializer=tf.zeros_initializer,
                     name='upscore_pool4')
 
@@ -113,10 +121,10 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
 
   # Apply 1x1 convolution to rescaled VGG layer 3 to reduce # of classes
   score_pool3 = tf.layers.conv2d(scale_pool3, num_classes,
-              kernel_size=1, strides=1, padding='same',
-              kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
-              kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
-              name='score_pool3')
+            kernel_size=1, strides=1, padding='same',
+            kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
+            kernel_initializer=tf.truncated_normal_initializer(stddev=kInitSTD),
+            name='score_pool3')
 
   # Add skip layer from VGG layer 3
   fuse_pool3 = tf.add(upscore_pool4, score_pool3)
@@ -124,7 +132,7 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
   # Upsample 8x by transposed convolution
   upscore8 = tf.layers.conv2d_transpose(fuse_pool3, num_classes,
                     kernel_size=16, strides=8, padding='same',
-                    kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),
+                    kernel_regularizer=tf.contrib.layers.l2_regularizer(kL2Reg),
                     kernel_initializer=tf.zeros_initializer,
                     name='upscore8')
 
@@ -205,6 +213,7 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op,
   # Initialize any uninitialized variables
   sess.run(tf.global_variables_initializer())
 
+  # Train network
   for epoch in range(epochs):
     print("Epoch #", epoch+1)
 
@@ -212,6 +221,8 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op,
       feed_dict = {input_image: image_batch,
                    correct_label: label_batch,
                    keep_prob: 0.5}
+
+      # Run training step on each batch
       _, loss_value, summary = sess.run([train_op, cross_entropy_loss,
                                          tb_merged], feed_dict=feed_dict)
 
@@ -223,39 +234,45 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op,
 print('\nTesting train_nn()...')
 tests.test_train_nn(train_nn)
 
+
 def parse_args():
-    parser = argparse.ArgumentParser()
+  """
+  Set up argument parser for command line operation of main.py program
+  """
 
-    parser.add_argument('-md', '--mode',
-      help='mode: 0=train, 1=test. [0]', type=int, default=0)
+  parser = argparse.ArgumentParser()
 
-    parser.add_argument('-ep', '--epochs',
-      help='epochs [1]', type=int, default=1)
+  parser.add_argument('-md', '--mode',
+    help='mode [1]: 0=Train, 1=Test, 2=Video', type=int, default=1)
 
-    parser.add_argument('-bs', '--batch_size',
-      help='batch size [1]', type=int, default=1)
+  parser.add_argument('-ep', '--epochs',
+    help='epochs [40]', type=int, default=40)
 
-    parser.add_argument('-lr', '--learn_rate',
-      help='learning rate [0.0001]', type=float, default=0.0001)
+  parser.add_argument('-bs', '--batch_size',
+    help='batch size [4]', type=int, default=4)
 
-    args = parser.parse_args()
-    return args
+  parser.add_argument('-lr', '--learn_rate',
+    help='learning rate [0.0001]', type=float, default=0.0001)
+
+  args = parser.parse_args()
+  return args
+
 
 def run():
+  """
+  Run main semantic segmentation program
+  """
 
   print('\nStarting run...')
   args = parse_args()
 
   # Basic parameters
-  kNumClasses = 2
+  kNumClasses = 2 # "road" or "not road"
   kImageShape = (160, 576)
   data_dir = './data'
   runs_dir = './runs'
   model_path = './duffnet/'
   model_name = 'duffnet'
-
-  print('\nTesting Kitti dataset...')
-  tests.test_for_kitti_dataset(data_dir) # check for Kitti data set
 
   # Hyperparameters
   epochs = args.epochs
@@ -265,19 +282,21 @@ def run():
   # TensorFlow placeholders
   correct_label = tf.placeholder(tf.bool, [None, None, None, kNumClasses])
 
-  # Download pretrained vgg model
+  # Check data set validity
+  print('\nTesting Kitti dataset...')
+  tests.test_for_kitti_dataset(data_dir)
+
+  # Download pretrained VGG model if necessary
   helper.maybe_download_pretrained_vgg(data_dir)
 
-  # Path to vgg model
+  # Path to VGG model
   vgg_path = os.path.join(data_dir, 'vgg')
   data_folder = os.path.join(data_dir, 'data_road/training')
 
-  # Create generator function to get batches
+  # Create generator function to get batches for training
   get_batches_fn = helper.gen_batch_function(data_folder, kImageShape)
 
-  # OPTIONAL: Augment Images for better results
-  #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
-
+  # Start TensorFlow session
   with tf.Session() as sess:
 
     ### Train new network ###
@@ -314,7 +333,58 @@ def run():
       helper.save_inference_samples(runs_dir, data_dir, sess, kImageShape,
                                     logits, keep_prob, img_input)
 
-    # OPTIONAL: Apply the trained model to a video
+    ### Process video ###
+    elif args.mode == 2:
+
+      def process_frame(img):
+        # Input image is a Numpy array, resize it to match NN input dimensions
+        img_orig_size = (img.shape[0], img.shape[1])
+        img_resized = scipy.misc.imresize(img, kImageShape)
+
+        # Get NN tensors
+        graph = tf.get_default_graph()
+        img_input = graph.get_tensor_by_name('image_input:0')
+        keep_prob = graph.get_tensor_by_name('keep_prob:0')
+        fcn8s_out = graph.get_tensor_by_name('fcn8s_out:0')
+        logits = tf.reshape(fcn8s_out, (-1, kNumClasses))
+
+        # Process image with NN
+        img_softmax = sess.run([tf.nn.softmax(logits)],
+                               {keep_prob: 1.0, img_input: [img_resized]})
+
+        # Reshape to 2D image dimensions
+        img_softmax = img_softmax[0][:, 1].reshape(kImageShape[0],
+                                                   kImageShape[1])
+
+        # Threshold softmax probability to a binary road judgement (>50%)
+        segmentation = (img_softmax > 0.5).reshape(kImageShape[0],
+                                                   kImageShape[1], 1)
+
+        # Apply road judgement to original image as a mask with alpha = 50%
+        mask = np.dot(segmentation, np.array([[0, 255, 0, 127]]))
+        mask = scipy.misc.toimage(mask, mode="RGBA")
+        street_img = Image.fromarray(img_resized)
+        street_img.paste(mask, box=None, mask=mask)
+
+        # Resize image back to original dimensions
+        street_img_resized = scipy.misc.imresize(street_img, img_orig_size)
+
+        # Output image as a Numpy array
+        img_out = np.array(street_img_resized)
+        return img_out
+
+      # Load saved model
+      saver = tf.train.import_meta_graph(model_path+model_name+'.meta')
+      saver.restore(sess, tf.train.latest_checkpoint(model_path))
+
+      # Process video frames
+      video_outfile = './video/project_video_out.mp4'
+      video = VideoFileClip('./video/project_video.mp4')#.subclip(37,38)
+      video_out = video.fl_image(process_frame)
+      video_out.write_videofile(video_outfile, audio=False)
+
+    else:
+      print('Error: Invalid mode selected.')
 
 
 if __name__ == '__main__':
