@@ -246,7 +246,7 @@ def parse_args():
     help='mode [1]: 0=Train, 1=Test, 2=Video', type=int, default=1)
 
   parser.add_argument('-ep', '--epochs',
-    help='epochs [40]', type=int, default=40)
+    help='epochs [20]', type=int, default=20)
 
   parser.add_argument('-bs', '--batch_size',
     help='batch size [4]', type=int, default=4)
